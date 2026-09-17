@@ -1,5 +1,171 @@
 @import "tailwindcss";
+@import "@fontsource/barlow/400.css";
+@import "@fontsource/barlow/500.css";
+@import "@fontsource/barlow/600.css";
+@import "@fontsource/barlow-condensed/500.css";
+@import "@fontsource/barlow-condensed/600.css";
+@import "chessground/assets/chessground.base.css";
+@import "chessground/assets/chessground.cburnett.css";
 
-@import 'chessground/assets/chessground.base.css';
-@import 'chessground/assets/chessground.brown.css';
-@import 'chessground/assets/chessground.cburnett.css';
+/*
+ * Palette: ardesia e carta. L'interfaccia è monocromatica di proposito,
+ * così che l'unico colore sullo schermo sia il giudizio del motore sulle
+ * mosse (lib/classes.ts). Barlow viene dalla segnaletica: cifre larghe e
+ * leggibili, con le tabulari per orologi e valutazioni.
+ */
+@theme {
+  --color-ink: #1b2130;
+  --color-deck: #232a3a;
+  --color-rule: #333c50;
+  --color-well: #151a26;
+  --color-paper: #e8e2d4;
+  --color-muted: #99a2b4;
+
+  --font-sans: "Barlow", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Barlow Condensed", "Barlow", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-ink);
+    color: var(--color-paper);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-paper);
+    outline-offset: 2px;
+  }
+
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  /*
+   * La colonna della scacchiera: larga quanto serve ma mai più alta dello
+   * schermo, tolto lo spazio per giocatori, comandi e intestazione.
+   */
+  .board-column {
+    width: 100%;
+    max-width: min(44rem, calc(100dvh - 20rem));
+    min-width: min(100%, 20rem);
+  }
+}
+
+/* -- scacchiera ----------------------------------------------------------- */
+
+cg-board {
+  background-color: #dcd5c3;
+  background-image: repeating-conic-gradient(#7f8f9d 0 25%, transparent 0 50%);
+  background-size: 25% 25%;
+  border-radius: 3px;
+}
+
+cg-board square.last-move {
+  background-color: rgba(64, 104, 178, 0.45);
+}
+
+cg-board square.check {
+  background: radial-gradient(ellipse at center, rgba(214, 75, 69, 0.95) 0%, rgba(214, 75, 69, 0.55) 35%, rgba(214, 75, 69, 0) 75%);
+}
+
+/*
+ * Coordinate dentro le case: numeri nell'angolo in alto della prima
+ * colonna, lettere nell'angolo in basso dell'ultima traversa. Il CSS di
+ * base di chessground le mette fuori dal bordo, e su schermi stretti
+ * facevano scorrere la pagina di lato.
+ */
+.cg-wrap coords {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(9px, 1.5vw, 12px);
+  line-height: 1;
+  opacity: 1;
+}
+
+.cg-wrap coords.ranks {
+  top: 0;
+  left: 0;
+  width: 12.5%;
+  height: 100%;
+  padding: 3px 0 0 3px;
+}
+
+.cg-wrap coords.ranks coord {
+  flex: 1 1 0;
+  transform: none;
+}
+
+.cg-wrap coords.files {
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: auto;
+  text-transform: none;
+  text-align: right;
+}
+
+.cg-wrap coords.files coord {
+  flex: 1 1 0;
+  padding: 0 3px 2px 0;
+}
+
+/* Colore opposto a quello della casa su cui sta la coordinata. */
+.orientation-white .ranks :nth-child(odd),
+.orientation-white .files :nth-child(odd),
+.orientation-black .ranks :nth-child(even),
+.orientation-black .files :nth-child(even) {
+  color: #dcd5c3;
+}
+
+.orientation-white .ranks :nth-child(even),
+.orientation-white .files :nth-child(even),
+.orientation-black .ranks :nth-child(odd),
+.orientation-black .files :nth-child(odd) {
+  color: #66778a;
+}
+
+/* Pezzi catturati accanto al nome: le immagini di chessground fuori dalla scacchiera. */
+.captured.cg-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.captured-group {
+  display: inline-flex;
+}
+
+.captured-piece {
+  display: block;
+  width: 1.15rem;
+  height: 1.15rem;
+  flex-shrink: 0;
+}
+
+.captured.cg-wrap .captured-piece piece {
+  position: static;
+  display: block;
+  width: 100%;
+  height: 100%;
+  will-change: auto;
+}
+
+.captured-group .captured-piece + .captured-piece {
+  margin-left: -0.6rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  cg-board piece.anim {
+    transition: none;
+  }
+}

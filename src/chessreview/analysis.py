@@ -6,13 +6,22 @@ posizioni serve solo a individuare dove la valutazione è crollata;
 una seconda passata profonda va solo su quelle. La stragrande
 maggioranza delle mosse di una partita è ovvia (ricatture forzate,
 sviluppi, mosse uniche) e non merita profondità.
+
+COERENZA DELLE VALUTAZIONI: la valutazione prima e quella dopo una
+mossa vengono dalla stessa ricerca ogni volta che è possibile. Una
+versione precedente riusava come "prima" il "dopo" della mossa
+precedente: non risparmiava nulla, perché la posizione andava
+analizzata comunque per avere le alternative, e mescolava numeri
+usciti da ricerche diverse, con scarti misurati fino a 30 punti di
+win% nelle posizioni tattiche. Il costo della perdita, che è la base
+di ogni giudizio, deve confrontare grandezze omogenee.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Literal, Sequence
 
 import chess
 
@@ -22,8 +31,9 @@ from .classification import (
     MoveContext,
     Thresholds,
     classify,
+    material_sacrificed,
 )
-from .engine import Engine, Evaluation, Line
+from .engine import Engine, Evaluation, Line, PositionAnalysis
 from .models import Color
 from .positions import ParsedGame, Position
 from .scoring import (
@@ -74,8 +84,8 @@ class MoveAnalysis:
     #: Le alternative calcolate, per mostrare cosa si poteva fare.
     alternatives: tuple[Line, ...]
 
-    #: Di quanto la migliore supera la seconda: identifica le mosse uniche.
-    margin_over_second: int | None
+    #: Di quanti punti di win% la migliore supera la seconda: identifica le mosse uniche.
+    win_margin_over_second: float | None
 
     #: Punti percentuali di probabilità di vittoria persi.
     win_percent_drop: float
@@ -83,7 +93,7 @@ class MoveAnalysis:
     centipawn_loss: int
     #: Profondità effettivamente usata: bassa in scansione, alta nel riesame.
     depth: int
-    #: Materiale dato via dalla mossa, secondo la static exchange evaluation.
+    #: Materiale dato via dalla mossa, al netto della ricattura.
     material_sacrificed: int
 
     is_best: bool
@@ -145,7 +155,11 @@ class GameAnalysis:
         ]
 
 
-ProgressCallback = Callable[[int, int], None]
+#: Le due fasi dell'analisi, per riferire l'avanzamento di entrambe.
+Phase = Literal["scan", "deep"]
+
+#: Chiamata con (fase, fatte, totali della fase).
+ProgressCallback = Callable[[Phase, int, int], None]
 
 
 @dataclass(frozen=True)
@@ -156,36 +170,34 @@ class _Raw:
     eval_after: Evaluation
     best_san: str
     best_uci: str
-    margin: int | None
+    win_margin: float | None
     alternatives: tuple[Line, ...]
     legal_moves: int
 
 
-def _evaluate_position(
-    engine: Engine,
-    position: Position,
-    depth: int,
-    *,
-    known_before: Evaluation | None = None,
-) -> _Raw:
+def _win_margin(analysis: PositionAnalysis) -> float | None:
+    """Distacco in win% fra la prima e la seconda variante, se c'è una seconda."""
+    if len(analysis.lines) < 2:
+        return None
+    return win_percent(analysis.lines[0].evaluation) - win_percent(analysis.lines[1].evaluation)
+
+
+def _evaluate_position(engine: Engine, position: Position, depth: int) -> _Raw:
     """
     Valuta una posizione e la mossa che vi è stata giocata.
 
-    `known_before` permette di riusare la valutazione già calcolata come
-    "dopo" della mossa precedente: sono la stessa posizione, e ricalcolarla
-    raddoppierebbe il costo dell'intera analisi. Le alternative però
-    servono comunque, quindi l'analisi si fa lo stesso: il riuso vale
-    solo per l'analisi della posizione DOPO la mossa.
+    Il "prima" è sempre la variante migliore di questa ricerca. Il "dopo"
+    viene dalla stessa ricerca se la mossa giocata è fra le varianti
+    calcolate, che è il caso della maggioranza delle mosse; solo
+    altrimenti serve una seconda analisi, della posizione dopo la mossa.
     """
     board = chess.Board(position.fen)
     legal_moves = board.legal_moves.count()
     analysis = engine.analyse(board, depth=depth, multipv=MULTIPV)
 
-    eval_before = known_before if known_before is not None else analysis.evaluation
+    eval_before = analysis.evaluation
     best = analysis.best
 
-    # La mossa giocata potrebbe già essere fra le varianti calcolate:
-    # in quel caso il motore ha già fatto il lavoro.
     played = analysis.line_for(position.uci)
     if played is not None:
         eval_after = played.evaluation
@@ -208,21 +220,27 @@ def _evaluate_position(
         eval_after=eval_after,
         best_san=best.move_san,
         best_uci=best.move_uci,
-        margin=analysis.margin_over_second,
+        win_margin=_win_margin(analysis),
         alternatives=analysis.lines,
         legal_moves=legal_moves,
     )
 
 
+def _previous_capture_square(previous: Position | None) -> str | None:
+    """Casella della cattura appena fatta dall'avversario, se era una cattura."""
+    if previous is None or not previous.is_capture:
+        return None
+    return previous.uci[2:4]
+
+
 def _build(
     position: Position,
+    previous: Position | None,
     raw: _Raw,
     depth: int,
     is_opening: bool,
     thresholds: Thresholds,
 ) -> MoveAnalysis:
-    from .classification import material_sacrificed
-
     drop = win_percent_lost(raw.eval_before, raw.eval_after)
     loss = min(ACPL_CAP, max(0, raw.eval_before.to_cp() - raw.eval_after.to_cp()))
     is_best = position.uci == raw.best_uci
@@ -237,8 +255,9 @@ def _build(
         win_percent_after=win_percent(raw.eval_after),
         eval_before=raw.eval_before,
         eval_after=raw.eval_after,
-        margin_over_second=raw.margin,
+        win_margin_over_second=raw.win_margin,
         legal_move_count=raw.legal_moves,
+        previous_capture_square=_previous_capture_square(previous),
     )
 
     return MoveAnalysis(
@@ -249,7 +268,7 @@ def _build(
         best_move_san=raw.best_san,
         best_move_uci=raw.best_uci,
         alternatives=raw.alternatives,
-        margin_over_second=raw.margin,
+        win_margin_over_second=raw.win_margin,
         win_percent_drop=drop,
         centipawn_loss=loss,
         depth=depth,
@@ -273,62 +292,95 @@ def analyse_game(
     """
     Analizza una partita con la strategia a due passate.
 
-    `on_progress` viene chiamata con (fatte, totali) durante la prima
-    passata, che è quella lunga.
+    `on_progress` viene chiamata con ("scan", fatte, totali) durante la
+    prima passata e con ("deep", fatte, totali) durante la seconda.
+    I totali della seconda si conoscono solo a prima passata finita:
+    per questo le fasi sono riferite separatamente e non come un'unica
+    percentuale, che tornerebbe indietro al cambio di fase.
     """
     positions: Sequence[Position] = game.positions
     total = len(positions)
 
     # -- prima passata: veloce, su tutto -------------------------------
-    scanned: list[tuple[Position, _Raw, bool]] = []
-
-    # La valutazione "dopo" una mossa è la valutazione "prima" della
-    # successiva: sono la stessa posizione. Riusarla dimezza il lavoro.
-    carried: Evaluation | None = None
+    scanned: list[_Raw] = []
 
     for index, position in enumerate(positions):
-        raw = _evaluate_position(engine, position, scan_depth, known_before=carried)
-        scanned.append((position, raw, position.ply < opening_plies))
-        carried = raw.eval_after.flipped()
-
+        scanned.append(_evaluate_position(engine, position, scan_depth))
         if on_progress is not None:
-            on_progress(index + 1, total)
+            on_progress("scan", index + 1, total)
+
+    # -- quali posizioni meritano il riesame ----------------------------
+    to_review = {
+        index
+        for index, (position, raw) in enumerate(zip(positions, scanned))
+        if position.ply >= opening_plies
+        and win_percent_lost(raw.eval_before, raw.eval_after) >= review_threshold
+    }
 
     # -- seconda passata: profonda, solo dove serve ---------------------
     final: list[MoveAnalysis] = []
-    deep_count = 0
+    reviewed = 0
 
-    for position, raw, is_opening in scanned:
-        drop = win_percent_lost(raw.eval_before, raw.eval_after)
-        needs_review = drop >= review_threshold and not is_opening
+    for index, (position, raw) in enumerate(zip(positions, scanned)):
+        previous = positions[index - 1] if index > 0 else None
+        is_opening = position.ply < opening_plies
 
-        if not needs_review:
-            final.append(_build(position, raw, scan_depth, is_opening, thresholds))
+        if index not in to_review:
+            final.append(_build(position, previous, raw, scan_depth, is_opening, thresholds))
             continue
 
-        deep_count += 1
         deep = _evaluate_position(engine, position, deep_depth)
-        final.append(_build(position, deep, deep_depth, is_opening, thresholds))
+        final.append(_build(position, previous, deep, deep_depth, is_opening, thresholds))
+        reviewed += 1
+        if on_progress is not None:
+            on_progress("deep", reviewed, len(to_review))
 
     moves = tuple(final)
+    white_accuracy, black_accuracy = _accuracies(moves)
     return GameAnalysis(
         moves=moves,
-        white=_player_report(moves, Color.WHITE),
-        black=_player_report(moves, Color.BLACK),
-        deep_positions=deep_count,
+        white=_player_report(moves, Color.WHITE, white_accuracy),
+        black=_player_report(moves, Color.BLACK, black_accuracy),
+        deep_positions=reviewed,
     )
 
 
-def _player_report(moves: Sequence[MoveAnalysis], color: Color) -> PlayerReport:
+def _white_win_percent(evaluation: Evaluation, mover: Color) -> float:
+    """Win% del bianco, da una valutazione orientata su chi muove."""
+    wp = win_percent(evaluation)
+    return wp if mover is Color.WHITE else 100.0 - wp
+
+
+def _accuracies(moves: Sequence[MoveAnalysis]) -> tuple[float, float]:
     """
-    I numeri di un giocatore, escludendo le mosse di apertura:
-    includerle gonfierebbe l'accuratezza di chiunque, perché
-    le prime mosse sono quasi sempre corrette.
+    Accuratezza di bianco e nero sull'intera partita.
+
+    Le mosse d'apertura sono incluse, come fanno Lichess e chess.com: sono
+    "libro" solo per la classificazione, ma la loro perdita è misurata, e un
+    errore vero alla terza mossa deve pesare sull'accuratezza.
+    """
+    if not moves:
+        return 100.0, 100.0
+    first = moves[0]
+    sequence = [_white_win_percent(first.eval_before, first.position.turn)]
+    sequence += [_white_win_percent(m.eval_after, m.position.turn) for m in moves]
+    return game_accuracy(
+        sequence,
+        [m.win_percent_drop for m in moves],
+        [m.position.turn is Color.WHITE for m in moves],
+    )
+
+
+def _player_report(moves: Sequence[MoveAnalysis], color: Color, accuracy: float) -> PlayerReport:
+    """
+    I numeri di un giocatore. Conteggi, ACPL e percentuale di mosse migliori
+    escludono le mosse d'apertura, che non vengono giudicate; l'accuratezza
+    arriva già calcolata sull'intera partita (vedi _accuracies).
     """
     own = [m for m in moves if m.position.turn is color and not m.is_opening]
     if not own:
         return PlayerReport(
-            color=color, moves=0, accuracy=100.0, acpl=0.0, best_moves=0, counts={}
+            color=color, moves=0, accuracy=accuracy, acpl=0.0, best_moves=0, counts={}
         )
 
     counts = Counter(m.classification for m in own)
@@ -336,7 +388,7 @@ def _player_report(moves: Sequence[MoveAnalysis], color: Color) -> PlayerReport:
     return PlayerReport(
         color=color,
         moves=len(own),
-        accuracy=game_accuracy([m.win_percent_drop for m in own]),
+        accuracy=accuracy,
         acpl=average_centipawn_loss([m.centipawn_loss for m in own]),
         best_moves=sum(1 for m in own if m.is_best),
         counts=dict(counts),

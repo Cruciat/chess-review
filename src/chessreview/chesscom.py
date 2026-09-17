@@ -16,13 +16,16 @@ from typing import Any, Iterator, Sequence
 
 import httpx
 
-from .models import Archive, ImportedGame, PlayerSide
+from .models import TIME_CLASSES, Archive, ImportedGame, PlayerProfile, PlayerSide, RatingStats
 from .pgn_tags import parse_tags
 
 BASE_URL = "https://api.chess.com/pub"
 
 #: Gli URL degli archivi finiscono con /YYYY/MM.
 _ARCHIVE_URL = re.compile(r"/(\d{4})/(\d{2})/?$")
+
+#: Il paese nel profilo è un URL come https://api.chess.com/pub/country/IT.
+_COUNTRY_URL = re.compile(r"/country/([A-Za-z]{2})/?$")
 
 
 class ChessComError(RuntimeError):
@@ -124,6 +127,65 @@ def parse_game(raw: dict[str, Any]) -> ImportedGame | None:
         uuid=raw.get("uuid") if isinstance(raw.get("uuid"), str) else None,
         initial_fen=raw.get("initial_setup") if isinstance(raw.get("initial_setup"), str) else None,
         tags=tags,
+    )
+
+
+def _timestamp(raw: Any) -> datetime | None:
+    return datetime.fromtimestamp(int(raw), tz=timezone.utc) if isinstance(raw, (int, float)) else None
+
+
+def _optional_str(raw: Any) -> str | None:
+    return raw if isinstance(raw, str) and raw.strip() else None
+
+
+def _nested_int(data: Any, *keys: str) -> int | None:
+    """data[k1][k2]... se è un numero, altrimenti None."""
+    for key in keys:
+        if not isinstance(data, dict):
+            return None
+        data = data.get(key)
+    return int(data) if isinstance(data, (int, float)) else None
+
+
+def parse_stats(payload: dict[str, Any]) -> tuple[RatingStats, ...]:
+    """
+    I rating per cadenza dall'endpoint /stats, nell'ordine di chess.com.
+    Le cadenze mai giocate non compaiono nella risposta e vengono saltate.
+    """
+    stats: list[RatingStats] = []
+    for time_class, key in TIME_CLASSES:
+        block = payload.get(key)
+        if not isinstance(block, dict):
+            continue
+        stats.append(
+            RatingStats(
+                time_class=time_class,
+                rating=_nested_int(block, "last", "rating"),
+                best=_nested_int(block, "best", "rating"),
+                wins=_nested_int(block, "record", "win") or 0,
+                losses=_nested_int(block, "record", "loss") or 0,
+                draws=_nested_int(block, "record", "draw") or 0,
+            )
+        )
+    return tuple(stats)
+
+
+def parse_profile(payload: dict[str, Any], stats: dict[str, Any] | None = None) -> PlayerProfile:
+    """Il profilo dall'endpoint /player, con i rating se è disponibile anche /stats."""
+    country_url = payload.get("country")
+    country_match = _COUNTRY_URL.search(country_url) if isinstance(country_url, str) else None
+
+    return PlayerProfile(
+        username=str(payload.get("username", "")),
+        name=_optional_str(payload.get("name")),
+        title=_optional_str(payload.get("title")),
+        avatar=_optional_str(payload.get("avatar")),
+        country=country_match.group(1).upper() if country_match else None,
+        joined=_timestamp(payload.get("joined")),
+        last_online=_timestamp(payload.get("last_online")),
+        league=_optional_str(payload.get("league")),
+        url=_optional_str(payload.get("url")),
+        ratings=parse_stats(stats) if stats else (),
     )
 
 
@@ -250,6 +312,25 @@ class ChessComClient:
             # Qui il 404 può voler dire una cosa sola.
             raise PlayerNotFound(user) from None
         return parse_archives(payload)
+
+    def fetch_profile(self, username: str) -> PlayerProfile:
+        """
+        Profilo e rating di un giocatore: due richieste, in serie come le altre.
+        Se le statistiche non arrivano, il profilo si restituisce lo stesso
+        senza rating: sono un di più, non la ragione della richiesta.
+        """
+        user = _normalize(username)
+        try:
+            payload = self._get(f"/player/{user}", username=user)
+        except _NotFound:
+            raise PlayerNotFound(user) from None
+
+        try:
+            stats: dict[str, Any] | None = self._get(f"/player/{user}/stats", username=user)
+        except ChessComError:
+            stats = None
+
+        return parse_profile(payload, stats)
 
     def fetch_month(self, username: str, year: int, month: int) -> list[ImportedGame]:
         """

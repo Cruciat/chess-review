@@ -99,16 +99,44 @@ class TestAnalisiDiPartita:
 
     def test_riferisce_l_avanzamento(self, engine: Engine) -> None:
         game = parse_pgn(SHORT_PGN)
-        passi: list[tuple[int, int]] = []
+        passi: list[tuple[str, int, int]] = []
         analyse_game(
             engine,
             game,
             scan_depth=8,
             deep_depth=10,
-            on_progress=lambda a, b: passi.append((a, b)),
+            on_progress=lambda fase, a, b: passi.append((fase, a, b)),
         )
-        assert passi[0] == (1, len(game))
-        assert passi[-1] == (len(game), len(game))
+        assert passi[0] == ("scan", 1, len(game))
+        assert ("scan", len(game), len(game)) in passi
+
+    def test_riferisce_anche_il_riesame(self, engine: Engine) -> None:
+        game = parse_pgn(LEGAL_TRAP)
+        passi: list[tuple[str, int, int]] = []
+        analysis = analyse_game(
+            engine,
+            game,
+            scan_depth=10,
+            deep_depth=12,
+            on_progress=lambda fase, a, b: passi.append((fase, a, b)),
+        )
+        riesami = [p for p in passi if p[0] == "deep"]
+        assert len(riesami) == analysis.deep_positions
+        if riesami:
+            assert riesami[-1] == ("deep", analysis.deep_positions, analysis.deep_positions)
+            # Le fasi non si mescolano: tutto il riesame viene dopo la scansione.
+            primo_riesame = passi.index(riesami[0])
+            assert all(p[0] == "scan" for p in passi[:primo_riesame])
+
+    def test_la_mossa_del_motore_non_perde_nulla(self, engine: Engine) -> None:
+        # Prima e dopo vengono dalla stessa ricerca: se hai giocato la
+        # mossa migliore, la perdita è zero esatto e non rumore fra due
+        # ricerche diverse. È la verifica del bug del riuso delle valutazioni.
+        for pgn in (LEGAL_TRAP, SHORT_PGN):
+            analysis = analyse_game(engine, parse_pgn(pgn), scan_depth=10, deep_depth=12)
+            for move in analysis.moves:
+                if move.is_best:
+                    assert move.win_percent_drop == 0.0, move.position.san
 
     def test_la_mossa_che_da_matto_non_perde_nulla(self, engine: Engine) -> None:
         # La posizione dopo è terminale e il motore non la analizzerebbe:

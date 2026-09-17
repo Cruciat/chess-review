@@ -17,7 +17,8 @@ import chess
 from ..analysis import GameAnalysis, MoveAnalysis, PlayerReport
 from ..classification import LABELS
 from ..engine import Evaluation
-from ..models import Color, ImportedGame
+from ..models import Color, ImportedGame, PlayerProfile
+from ..scoring import win_percent
 
 
 def evaluation_json(evaluation: Evaluation) -> dict[str, Any]:
@@ -45,6 +46,21 @@ def white_win_percent(move: MoveAnalysis) -> float:
     """
     wp = move.win_percent_after
     return wp if move.position.turn is Color.WHITE else 100.0 - wp
+
+
+def start_white_win_percent(analysis: GameAnalysis) -> float:
+    """
+    Probabilità di vittoria del bianco nella posizione iniziale.
+
+    È il primo punto del grafico: senza, la curva comincerebbe dalla
+    posizione dopo la prima mossa e la scacchiera iniziale non avrebbe
+    un valore da mostrare.
+    """
+    if not analysis.moves:
+        return 50.0
+    first = analysis.moves[0]
+    wp = win_percent(first.eval_before)
+    return wp if first.position.turn is Color.WHITE else 100.0 - wp
 
 
 def move_json(move: MoveAnalysis) -> dict[str, Any]:
@@ -97,15 +113,25 @@ def report_json(report: PlayerReport) -> dict[str, Any]:
     }
 
 
-def analysis_json(analysis: GameAnalysis, game: ImportedGame | None) -> dict[str, Any]:
+def analysis_json(
+    analysis: GameAnalysis,
+    game: ImportedGame | None,
+    username: str | None = None,
+) -> dict[str, Any]:
+    """
+    L'analisi completa. Lo username serve solo a riempire yourColor e
+    yourOutcome nei metadati della partita: senza, la scacchiera non
+    saprebbe da che lato orientarsi.
+    """
     payload: dict[str, Any] = {
         "moves": [move_json(m) for m in analysis.moves],
         "white": report_json(analysis.white),
         "black": report_json(analysis.black),
         "deepPositions": analysis.deep_positions,
+        "startWhiteWinPercent": round(start_white_win_percent(analysis), 2),
     }
     if game is not None:
-        payload["game"] = game_json(game)
+        payload["game"] = game_json(game, username)
     return payload
 
 
@@ -115,7 +141,7 @@ def game_json(game: ImportedGame, username: str | None = None) -> dict[str, Any]
     outcome = game.outcome_for(username) if username else None
 
     return {
-        "id": game.url,
+        "id": game.id,
         "url": game.url,
         "white": {
             "username": game.white.username,
@@ -137,4 +163,30 @@ def game_json(game: ImportedGame, username: str | None = None) -> dict[str, Any]
         "isStandard": game.is_standard,
         "yourColor": color.value if color else None,
         "yourOutcome": outcome.value if outcome else None,
+    }
+
+
+def player_json(profile: PlayerProfile) -> dict[str, Any]:
+    """Profilo e rating di un giocatore, per l'intestazione dell'elenco."""
+    return {
+        "username": profile.username,
+        "name": profile.name,
+        "title": profile.title,
+        "avatar": profile.avatar,
+        "country": profile.country,
+        "joined": profile.joined.isoformat() if profile.joined else None,
+        "lastOnline": profile.last_online.isoformat() if profile.last_online else None,
+        "league": profile.league,
+        "url": profile.url,
+        "ratings": [
+            {
+                "timeClass": r.time_class,
+                "rating": r.rating,
+                "best": r.best,
+                "wins": r.wins,
+                "losses": r.losses,
+                "draws": r.draws,
+            }
+            for r in profile.ratings
+        ],
     }

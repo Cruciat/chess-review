@@ -12,7 +12,14 @@ from __future__ import annotations
 import sys
 import time
 
-from chessreview.analysis import DEEP_DEPTH, SCAN_DEPTH, GameAnalysis, MoveAnalysis, analyse_game
+from chessreview.analysis import (
+    DEEP_DEPTH,
+    SCAN_DEPTH,
+    GameAnalysis,
+    MoveAnalysis,
+    Phase,
+    analyse_game,
+)
 from chessreview.chesscom import ChessComClient
 from chessreview.classification import LABELS, MoveClass
 from chessreview.engine import Engine, find_stockfish
@@ -156,8 +163,9 @@ def main() -> int:
     start = time.monotonic()
     with Engine(threads=THREADS, hash_mb=256) as engine:
 
-        def progress(done: int, total: int) -> None:
-            print(f"\r  scansione {done}/{total}", end="", flush=True)
+        def progress(phase: Phase, done: int, total: int) -> None:
+            fase = "scansione" if phase == "scan" else "riesame  "
+            print(f"\r  {fase} {done}/{total}   ", end="", flush=True)
 
         analysis = analyse_game(engine, parsed, on_progress=progress)
 

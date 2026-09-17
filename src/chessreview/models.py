@@ -9,11 +9,13 @@ partita importata con un campo mancante che un import che esplode.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
-from .pgn_tags import parse_time_control
+from .pgn_tags import parse_time_control, parse_utc_datetime
 
 # Varianti: Stockfish le valuterebbe come scacchi normali,
 # producendo giudizi senza senso. Vanno riconosciute e scartate.
@@ -31,6 +33,10 @@ DRAW_RESULTS = frozenset(
         "timevsinsufficient",
     }
 )
+
+#: URL delle partite: il formato attuale è /game/live/123, quello degli
+#: archivi più vecchi /live/game/123. Vanno riconosciuti entrambi.
+_GAME_URL = re.compile(r"/(?:game/(live|daily)|(live|daily)/game)/(\d+)")
 
 
 class Color(str, Enum):
@@ -103,6 +109,25 @@ class ImportedGame:
     tags: dict[str, str] = field(default_factory=dict)
 
     @property
+    def id(self) -> str:
+        """
+        Identificativo stabile e sicuro da mettere in un percorso HTTP.
+
+        L'URL intero non va bene: le sue barre e i suoi due punti vengono
+        riscritti da proxy e browser. Si usa tipo e numero della partita,
+        es. 'live-123456789', perché live e daily hanno numerazioni
+        separate. In mancanza si ripiega sull'uuid, e in ultima istanza
+        su un'impronta dell'URL, che è comunque deterministica.
+        """
+        match = _GAME_URL.search(self.url)
+        if match:
+            kind = match.group(1) or match.group(2)
+            return f"{kind}-{match.group(3)}"
+        if self.uuid:
+            return self.uuid
+        return hashlib.sha1(self.url.encode("utf-8")).hexdigest()[:16]
+
+    @property
     def is_standard(self) -> bool:
         """Scacchi normali, non una variante."""
         return self.rules == STANDARD_RULES
@@ -142,8 +167,6 @@ class ImportedGame:
     @property
     def started_at(self) -> datetime:
         """Inizio della partita se noto, altrimenti la fine."""
-        from .pgn_tags import parse_utc_datetime
-
         date = self.tags.get("UTCDate")
         time = self.tags.get("UTCTime")
         if date and time:
@@ -171,3 +194,46 @@ class ImportedGame:
     def opponent_of(self, username: str) -> PlayerSide | None:
         color = self.color_of(username)
         return self.side(color.opponent) if color else None
+
+
+#: Le cadenze nell'ordine in cui le mostra chess.com, con la chiave
+#: che usa l'endpoint delle statistiche.
+TIME_CLASSES: tuple[tuple[str, str], ...] = (
+    ("rapid", "chess_rapid"),
+    ("blitz", "chess_blitz"),
+    ("bullet", "chess_bullet"),
+    ("daily", "chess_daily"),
+)
+
+
+@dataclass(frozen=True)
+class RatingStats:
+    """Il rating di un giocatore in una cadenza, con il record di partite."""
+
+    time_class: str
+    rating: int | None
+    best: int | None
+    wins: int
+    losses: int
+    draws: int
+
+    @property
+    def games(self) -> int:
+        return self.wins + self.losses + self.draws
+
+
+@dataclass(frozen=True)
+class PlayerProfile:
+    """Il profilo pubblico di un giocatore, per l'intestazione dell'elenco partite."""
+
+    username: str
+    name: str | None = None
+    title: str | None = None
+    avatar: str | None = None
+    #: Codice ISO a due lettere, es. "IT": chess.com dà l'URL del paese.
+    country: str | None = None
+    joined: datetime | None = None
+    last_online: datetime | None = None
+    league: str | None = None
+    url: str | None = None
+    ratings: tuple[RatingStats, ...] = ()

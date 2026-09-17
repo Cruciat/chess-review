@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .schemas import analysis_json, game_json
+from .schemas import analysis_json, game_json, player_json
 from .service import AnalysisService, ServiceError
 
 service = AnalysisService()
@@ -73,8 +73,18 @@ def games(
     }
 
 
-@app.get("/api/analysis/{game_id:path}")
-def cached(game_id: str) -> dict[str, Any]:
+@app.get("/api/player/{username}")
+def player(username: str) -> dict[str, Any]:
+    """Profilo pubblico e rating di un giocatore."""
+    try:
+        profile = service.get_player(username)
+    except ServiceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return player_json(profile)
+
+
+@app.get("/api/analysis/{game_id}")
+def cached(game_id: str, username: str | None = None) -> dict[str, Any]:
     """L'analisi se già presente in cache, altrimenti 404."""
     analysis = service.cached_analysis(game_id)
     if analysis is None:
@@ -84,16 +94,21 @@ def cached(game_id: str) -> dict[str, Any]:
         game = service.get_game(game_id)
     except ServiceError:
         game = None
-    return analysis_json(analysis, game)
+    return analysis_json(analysis, game, username)
 
 
-def _stream(game_id: str) -> Iterator[str]:
+def _stream(game_id: str, username: str | None) -> Iterator[str]:
     """
     Esegue l'analisi in un thread e ne riporta l'avanzamento.
 
     L'analisi è sincrona e bloccante: girando nel thread della richiesta
     impedirebbe al server di rispondere ad altro. Il thread comunica
     attraverso una coda, che questo generatore svuota man mano.
+
+    L'evento di errore si chiama "failure" e non "error": "error" è il
+    nome dell'evento nativo con cui EventSource segnala le disconnessioni,
+    e usarlo anche per gli errori applicativi rende i due casi
+    indistinguibili nel browser.
     """
     events: queue.Queue[tuple[str, Any]] = queue.Queue()
 
@@ -101,34 +116,34 @@ def _stream(game_id: str) -> Iterator[str]:
         try:
             analysis = service.analyse(
                 game_id,
-                on_progress=lambda done, total: events.put(
-                    ("progress", {"done": done, "total": total})
+                on_progress=lambda phase, done, total: events.put(
+                    ("progress", {"phase": phase, "done": done, "total": total})
                 ),
             )
             try:
                 game = service.get_game(game_id)
             except ServiceError:
                 game = None
-            events.put(("result", analysis_json(analysis, game)))
+            events.put(("result", analysis_json(analysis, game, username)))
         except ServiceError as exc:
-            events.put(("error", {"message": str(exc)}))
+            events.put(("failure", {"message": str(exc)}))
         except Exception as exc:  # noqa: BLE001 — l'errore va comunicato, non nascosto
-            events.put(("error", {"message": f"{type(exc).__name__}: {exc}"}))
+            events.put(("failure", {"message": f"{type(exc).__name__}: {exc}"}))
 
     threading.Thread(target=work, daemon=True).start()
 
     while True:
         kind, payload = events.get()
         yield sse(kind, payload)
-        if kind in ("result", "error"):
+        if kind in ("result", "failure"):
             return
 
 
-@app.get("/api/analyse/{game_id:path}")
-def analyse(game_id: str) -> StreamingResponse:
+@app.get("/api/analyse/{game_id}")
+def analyse(game_id: str, username: str | None = None) -> StreamingResponse:
     """Analizza una partita, riportando l'avanzamento via SSE."""
     return StreamingResponse(
-        _stream(game_id),
+        _stream(game_id, username),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -56,3 +56,41 @@ def game_payload(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+#: Risposta di /pub/player/{username}, coi campi che usiamo.
+PROFILE_PAYLOAD: dict[str, Any] = {
+    "avatar": "https://images.chesscomfiles.com/uploads/v1/user/1.jpeg",
+    "player_id": 1,
+    "url": "https://www.chess.com/member/Cruciat",
+    "name": "Cruciat",
+    "username": "cruciat",
+    "followers": 10,
+    "country": "https://api.chess.com/pub/country/IT",
+    "last_online": 1_789_590_000,
+    "joined": 1_496_534_400,
+    "status": "basic",
+    "is_streamer": False,
+    "league": "Legend",
+}
+
+#: Risposta di /pub/player/{username}/stats: le cadenze mai giocate mancano.
+STATS_PAYLOAD: dict[str, Any] = {
+    "chess_daily": {
+        "last": {"rating": 793, "date": 1_700_000_000, "rd": 120},
+        "best": {"rating": 900, "date": 1_600_000_000, "game": "https://www.chess.com/game/daily/1"},
+        "record": {"win": 10, "loss": 12, "draw": 1, "time_per_move": 3000, "timeout_percent": 0},
+    },
+    "chess_rapid": {
+        "last": {"rating": 981, "date": 1_789_000_000, "rd": 60},
+        "best": {"rating": 1050, "date": 1_700_000_000, "game": "https://www.chess.com/game/live/2"},
+        "record": {"win": 120, "loss": 110, "draw": 9},
+    },
+    "chess_blitz": {
+        "last": {"rating": 948, "date": 1_789_590_000, "rd": 45},
+        "best": {"rating": 1012, "date": 1_750_000_000, "game": "https://www.chess.com/game/live/3"},
+        "record": {"win": 800, "loss": 790, "draw": 40},
+    },
+    "fide": 0,
+    "tactics": {"highest": {"rating": 1500, "date": 1}},
+}

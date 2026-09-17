@@ -124,11 +124,16 @@ class Thresholds:
     #: Sotto questa, dopo una mossa, la vittoria è stata persa.
     lost_win: float = 60.0
 
-    #: Margine in centipawn oltre il quale la migliore è "unica".
-    #: Alto di proposito: in posizioni sbilanciate qualunque ricattura
-    #: forzata stacca di 150, e marcarle tutte come uniche svuota
-    #: la categoria del suo significato.
-    critical_margin: int = 250
+    #: Distacco minimo fra la migliore e la seconda, in punti di probabilità
+    #: di vittoria, perché la migliore sia "unica".
+    #:
+    #: È in win% e non in centipawn per due motivi. Un matto vale 10000
+    #: centipawn, quindi qualunque matto superava la soglia anche con
+    #: alternative comodamente vincenti. E in posizioni già decise un
+    #: distacco di qualche pedone non cambia nulla, mentre la win% lo
+    #: sconta da sola. 20 punti corrispondono circa a 250 centipawn
+    #: a partire da una posizione pari.
+    critical_margin: float = 20.0
     #: Perdita massima perché una mossa unica conti come tale.
     critical_max_drop: float = 2.0
 
@@ -136,8 +141,11 @@ class Thresholds:
     sacrifice_material: int = 2
     #: Perdita massima perché un sacrificio sia brillante.
     brilliant_max_drop: float = 2.0
-    #: Sopra questa probabilità di vittoria un sacrificio non è brillante:
-    #: quando hai già vinto, dare via un pezzo non costa niente.
+    #: Se senza la mossa giocata avevi comunque almeno questa probabilità
+    #: di vittoria, il sacrificio non è brillante: quando avresti vinto lo
+    #: stesso, dare via un pezzo non è un merito. Si guarda la migliore
+    #: alternativa e non la posizione, altrimenti un sacrificio che forza
+    #: il matto risulterebbe "già vinto" proprio grazie a sé stesso.
     brilliant_max_win: float = 85.0
 
 
@@ -163,9 +171,13 @@ class MoveContext:
     win_percent_after: float
     eval_before: Evaluation
     eval_after: Evaluation
-    #: Di quanto la migliore supera la seconda, in centipawn.
-    margin_over_second: int | None
+    #: Di quanto la migliore supera la seconda, in punti di win%.
+    win_margin_over_second: float | None
     legal_move_count: int
+    #: Casella su cui l'avversario ha appena catturato, se la sua ultima
+    #: mossa era una cattura. Serve a riconoscere le ricatture, e dal solo
+    #: FEN non è ricavabile: il FEN non contiene la mossa precedente.
+    previous_capture_square: str | None = None
 
 
 def _material(board: chess.Board, color: chess.Color) -> int:
@@ -239,27 +251,33 @@ def material_sacrificed(fen: str, move_uci: str) -> int:
     return max(0, before - worst)
 
 
-def is_trivial_recapture(fen: str, move_uci: str) -> bool:
+def is_trivial_recapture(
+    fen: str,
+    move_uci: str,
+    previous_capture_square: str | None,
+) -> bool:
     """
     La mossa riprende semplicemente un pezzo appena catturato.
 
     Serve a non gonfiare la categoria "unica": una ricattura forzata
     stacca sempre nettamente dalle alternative, ma trovarla non è
     un merito, è l'unica cosa sensata da fare.
+
+    Una ricattura è una cattura sulla stessa casella su cui l'avversario
+    ha appena catturato. La casella va passata da fuori perché il FEN
+    non conserva la mossa precedente: la versione di prima provava a
+    dedurla dal contatore delle semimosse, che però si azzera anche
+    dopo una cattura altrove e dopo qualunque mossa di pedone.
     """
+    if previous_capture_square is None:
+        return False
+
     board = chess.Board(fen)
     move = chess.Move.from_uci(move_uci)
     if move not in board.legal_moves or not board.is_capture(move):
         return False
 
-    # Se la mossa precedente ha catturato sulla stessa casella,
-    # questa è una ricattura.
-    if not board.move_stack:
-        # Dal FEN non abbiamo la storia: si usa il contatore delle
-        # mosse senza catture, che è zero subito dopo una cattura.
-        return board.halfmove_clock == 0
-    last = board.move_stack[-1]
-    return last.to_square == move.to_square
+    return chess.square_name(move.to_square) == previous_capture_square
 
 
 def classify(
@@ -299,10 +317,12 @@ def classify(
     #    e se non era una ricattura ovvia.
     if (
         context.is_best
-        and context.margin_over_second is not None
-        and context.margin_over_second >= thresholds.critical_margin
+        and context.win_margin_over_second is not None
+        and context.win_margin_over_second >= thresholds.critical_margin
         and context.win_percent_drop <= thresholds.critical_max_drop
-        and not is_trivial_recapture(context.fen_before, context.move_uci)
+        and not is_trivial_recapture(
+            context.fen_before, context.move_uci, context.previous_capture_square
+        )
     ):
         return MoveClass.CRITICAL
 
@@ -327,16 +347,30 @@ def _is_brilliant(context: MoveContext, thresholds: Thresholds) -> bool:
 
     1. la mossa è buona: perde pochissima probabilità di vittoria
     2. sacrifica materiale che l'avversario può davvero prendere
-    3. la posizione non era già vinta: sacrificare a +10 non è brillante,
-       è indifferente
-    4. non era l'unica mossa: se tutto il resto perdeva, non hai scelto
+    3. senza questa mossa non si vinceva comunque: sacrificare a +10 con
+       dieci alternative vincenti non è brillante, è indifferente
+    4. non era l'unica mossa legale: se non c'era scelta, non hai scelto
     """
     if context.win_percent_drop > thresholds.brilliant_max_drop:
         return False
-    if context.win_percent_before > thresholds.brilliant_max_win:
+    if _best_alternative_win(context) > thresholds.brilliant_max_win:
         return False
     if context.legal_move_count < 2:
         return False
 
     sacrificed = material_sacrificed(context.fen_before, context.move_uci)
     return sacrificed >= thresholds.sacrifice_material
+
+
+def _best_alternative_win(context: MoveContext) -> float:
+    """
+    Probabilità di vittoria della migliore mossa diversa da quella giocata.
+
+    Se la mossa giocata non è la migliore, l'alternativa è la migliore
+    stessa. Se lo è, l'alternativa è la seconda, che si ricava dal
+    distacco. Senza distacco noto si torna alla posizione: è la stima
+    prudente, che nel dubbio non concede la brillantezza.
+    """
+    if context.is_best and context.win_margin_over_second is not None:
+        return context.win_percent_before - context.win_margin_over_second
+    return context.win_percent_before

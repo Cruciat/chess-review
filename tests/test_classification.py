@@ -13,6 +13,7 @@ from chessreview.classification import (
     material_sacrificed,
 )
 from chessreview.engine import Evaluation
+from chessreview.scoring import win_percent
 
 
 def context(
@@ -24,10 +25,11 @@ def context(
     drop: float = 0.0,
     before: float = 50.0,
     after: float | None = None,
-    margin: int | None = None,
+    margin: float | None = None,
     legal: int = 20,
     eval_before: Evaluation | None = None,
     eval_after: Evaluation | None = None,
+    previous_capture: str | None = None,
 ) -> MoveContext:
     return MoveContext(
         fen_before=fen,
@@ -39,8 +41,9 @@ def context(
         win_percent_after=after if after is not None else before - drop,
         eval_before=eval_before or Evaluation(cp=0),
         eval_after=eval_after or Evaluation(cp=0),
-        margin_over_second=margin,
+        win_margin_over_second=margin,
         legal_move_count=legal,
+        previous_capture_square=previous_capture,
     )
 
 
@@ -74,14 +77,29 @@ class TestSacrificio:
         assert material_sacrificed(chess.STARTING_FEN, "e2e5") == 0
 
 
+#: Dopo 1.e4 d5 2.exd5: il bianco ha appena catturato in d5.
+AFTER_EXD5 = "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 2"
+
+
 class TestRicattura:
     def test_riconosce_una_ricattura(self) -> None:
-        # Halfmove clock a zero: una cattura è appena avvenuta.
-        fen = "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 2"
-        assert is_trivial_recapture(fen, "d8d5")
+        assert is_trivial_recapture(AFTER_EXD5, "d8d5", "d5")
 
     def test_una_mossa_tranquilla_non_lo_e(self) -> None:
-        assert not is_trivial_recapture(chess.STARTING_FEN, "e2e4")
+        assert not is_trivial_recapture(chess.STARTING_FEN, "e2e4", None)
+
+    def test_catturare_altrove_non_e_ricatturare(self) -> None:
+        # Partita dell'Opera, 4.dxe5 Bxf3: il bianco ha catturato in e5,
+        # il nero cattura in f3. Il contatore delle semimosse è a zero,
+        # ed è proprio il caso che la vecchia euristica sbagliava.
+        fen = "rn1qkbnr/ppp2ppp/3p4/4P3/4P1b1/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 4"
+        assert not is_trivial_recapture(fen, "g4f3", "e5")
+
+    def test_una_cattura_dopo_una_mossa_di_pedone_non_lo_e(self) -> None:
+        # Anche una mossa di pedone azzera il contatore: senza la casella
+        # della cattura precedente non c'è ricattura.
+        fen = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+        assert not is_trivial_recapture(fen, "e4d5", None)
 
 
 class TestOrdineDeiControlli:
@@ -132,26 +150,44 @@ class TestScalaDellePerdite:
 
 class TestMossaUnica:
     def test_riconosce_l_unica_mossa_che_tiene(self) -> None:
-        klass = classify(context(is_best=True, margin=400, drop=0.0))
+        klass = classify(context(is_best=True, margin=30.0, drop=0.0))
         assert klass is MoveClass.CRITICAL
 
     def test_non_lo_e_se_le_alternative_erano_equivalenti(self) -> None:
-        klass = classify(context(is_best=True, margin=20, drop=0.0))
+        klass = classify(context(is_best=True, margin=2.0, drop=0.0))
         assert klass is MoveClass.BEST
 
     def test_serve_un_margine_ampio(self) -> None:
-        # 200 non basta: in posizioni sbilanciate lo stacca qualunque
-        # ricattura forzata, e la categoria si svuoterebbe di senso.
-        assert classify(context(is_best=True, margin=200, drop=0.0)) is MoveClass.BEST
-        assert classify(context(is_best=True, margin=300, drop=0.0)) is MoveClass.CRITICAL
+        assert classify(context(is_best=True, margin=15.0, drop=0.0)) is MoveClass.BEST
+        assert classify(context(is_best=True, margin=25.0, drop=0.0)) is MoveClass.CRITICAL
 
-    def test_una_ricattura_ovvia_non_lo_e(self) -> None:
-        fen = "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 2"
-        klass = classify(context(fen=fen, move="d8d5", is_best=True, margin=600, legal=25))
+    def test_un_matto_con_alternative_vincenti_non_e_unico(self) -> None:
+        # Matto in uno contro una seconda linea a +8: 100% contro circa 95%.
+        # Col margine in centipawn il matto valeva 10000 e passava sempre.
+        seconda = win_percent(Evaluation(cp=800))
+        klass = classify(context(is_best=True, margin=100.0 - seconda, drop=0.0, before=100.0))
         assert klass is MoveClass.BEST
 
+    def test_una_ricattura_ovvia_non_lo_e(self) -> None:
+        klass = classify(
+            context(
+                fen=AFTER_EXD5,
+                move="d8d5",
+                is_best=True,
+                margin=40.0,
+                legal=25,
+                previous_capture="d5",
+            )
+        )
+        assert klass is MoveClass.BEST
+
+    def test_una_cattura_unica_che_non_riprende_lo_e(self) -> None:
+        # Stessa mossa, ma senza cattura precedente in d5: è una scelta vera.
+        klass = classify(context(fen=AFTER_EXD5, move="d8d5", is_best=True, margin=40.0, legal=25))
+        assert klass is MoveClass.CRITICAL
+
     def test_non_lo_e_se_non_l_hai_trovata(self) -> None:
-        klass = classify(context(is_best=False, margin=400, drop=8.0))
+        klass = classify(context(is_best=False, margin=30.0, drop=8.0))
         assert klass is MoveClass.INACCURACY
 
 
@@ -174,6 +210,17 @@ class TestMossaBrillante:
         # A +9 dare via un alfiere non è un merito, è indifferente.
         klass = classify(context(fen=SAC_FEN, move="c4f7", drop=0.5, before=95.0))
         assert klass is not MoveClass.BRILLIANT
+
+    def test_un_sacrificio_che_forza_il_matto_lo_e(self) -> None:
+        # Partita dell'Opera, 16.Qb8+: dopo la mossa è matto in due, quindi
+        # la posizione vale 100%, ma solo grazie al sacrificio. La migliore
+        # alternativa lasciava il bianco intorno al 70%.
+        ctx = context(fen=SAC_FEN, move="c4f7", is_best=True, drop=0.0, before=100.0, margin=30.0)
+        assert classify(ctx) is MoveClass.BRILLIANT
+
+    def test_non_lo_e_se_anche_le_alternative_vincevano(self) -> None:
+        ctx = context(fen=SAC_FEN, move="c4f7", is_best=True, drop=0.0, before=100.0, margin=3.0)
+        assert classify(ctx) is not MoveClass.BRILLIANT
 
     def test_una_mossa_senza_sacrificio_non_lo_e(self) -> None:
         klass = classify(context(move="e2e4", drop=0.0, is_best=True))

@@ -87,10 +87,59 @@ class TestAccuratezza:
         for drop in (0.0, 1.0, 50.0, 100.0, 1000.0):
             assert 0.0 <= move_accuracy(drop) <= 100.0
 
-    def test_media_sulla_partita(self) -> None:
-        assert game_accuracy([0.0, 0.0, 0.0]) == pytest.approx(100.0, abs=0.1)
-        assert game_accuracy([]) == 100.0
-        assert game_accuracy([0.0, 40.0]) < game_accuracy([0.0, 5.0])
+
+
+class TestAccuratezzaDellaPartita:
+    @staticmethod
+    def sequenza(drops: list[float], start: float = 50.0) -> tuple[list[float], list[float], list[bool]]:
+        """Win% del bianco coerente con le perdite, mosse alternate a partire dal bianco."""
+        white = [start]
+        movers = []
+        for i, drop in enumerate(drops):
+            is_white = i % 2 == 0
+            movers.append(is_white)
+            white.append(white[-1] - drop if is_white else white[-1] + drop)
+        return white, drops, movers
+
+    def test_una_partita_perfetta_vale_cento(self) -> None:
+        bianco, nero = game_accuracy(*self.sequenza([0.0] * 20))
+        assert bianco == pytest.approx(100.0, abs=0.2)
+        assert nero == pytest.approx(100.0, abs=0.2)
+
+    def test_senza_mosse_vale_cento(self) -> None:
+        assert game_accuracy([50.0], [], []) == (100.0, 100.0)
+
+    def test_i_colori_sono_separati(self) -> None:
+        # Un blunder del nero non tocca l'accuratezza del bianco.
+        drops = [0.0] * 20
+        drops[11] = 40.0
+        bianco, nero = game_accuracy(*self.sequenza(drops))
+        assert bianco == pytest.approx(100.0, abs=0.2)
+        assert nero < 90.0
+
+    def test_un_blunder_pesa_piu_che_nella_media_semplice(self) -> None:
+        # È il motivo del metodo: nella media aritmetica dieci mosse
+        # perfette annegano l'errore che ha deciso la partita.
+        drops = [0.0] * 20
+        drops[10] = 40.0
+        bianco, _ = game_accuracy(*self.sequenza(drops))
+        semplice = sum(move_accuracy(d) for d in drops[0::2]) / 10
+        assert bianco < semplice - 5.0
+
+    def test_piu_perdi_piu_scende(self) -> None:
+        piccolo = [0.0] * 20
+        piccolo[10] = 5.0
+        grande = [0.0] * 20
+        grande[10] = 40.0
+        assert game_accuracy(*self.sequenza(grande))[0] < game_accuracy(*self.sequenza(piccolo))[0]
+
+    def test_resta_nell_intervallo(self) -> None:
+        for acc in game_accuracy(*self.sequenza([100.0, 0.0] * 10)):
+            assert 0.0 <= acc <= 100.0
+
+    def test_rifiuta_lunghezze_incoerenti(self) -> None:
+        with pytest.raises(ValueError):
+            game_accuracy([50.0, 50.0], [0.0, 0.0], [True, False])
 
 
 class TestAcpl:

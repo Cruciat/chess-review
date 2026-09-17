@@ -11,9 +11,11 @@ from chessreview.chesscom import (
     PlayerNotFound,
     parse_archives,
     parse_games,
+    parse_profile,
+    parse_stats,
 )
 
-from fixtures_data import ARCHIVES_PAYLOAD, game_payload
+from fixtures_data import ARCHIVES_PAYLOAD, PROFILE_PAYLOAD, STATS_PAYLOAD, game_payload
 
 def client_with(handler: Any, **kwargs: Any) -> ChessComClient:
     """
@@ -201,3 +203,65 @@ class TestThrottle:
         # La prima richiesta parte subito, la seconda attende.
         assert len(attese) == 1
         assert 0 < attese[0] <= 5.0
+
+
+class TestProfilo:
+    def test_legge_il_profilo(self) -> None:
+        profile = parse_profile(PROFILE_PAYLOAD, STATS_PAYLOAD)
+        assert profile.username == "cruciat"
+        assert profile.country == "IT"
+        assert profile.league == "Legend"
+        assert profile.joined is not None and profile.joined.year == 2017
+
+    def test_i_rating_seguono_l_ordine_di_chess_com(self) -> None:
+        # Nella risposta daily viene prima, ma si mostra per ultima.
+        stats = parse_stats(STATS_PAYLOAD)
+        assert [s.time_class for s in stats] == ["rapid", "blitz", "daily"]
+
+    def test_le_cadenze_mai_giocate_mancano(self) -> None:
+        assert all(s.time_class != "bullet" for s in parse_stats(STATS_PAYLOAD))
+
+    def test_legge_rating_migliore_e_record(self) -> None:
+        blitz = next(s for s in parse_stats(STATS_PAYLOAD) if s.time_class == "blitz")
+        assert (blitz.rating, blitz.best) == (948, 1012)
+        assert (blitz.wins, blitz.losses, blitz.draws) == (800, 790, 40)
+        assert blitz.games == 1630
+
+    def test_regge_campi_mancanti(self) -> None:
+        profile = parse_profile({"username": "x", "country": 42}, {"chess_blitz": {"last": "rotto"}})
+        assert profile.country is None
+        assert profile.avatar is None
+        assert profile.ratings[0].rating is None
+        assert profile.ratings[0].games == 0
+
+    def test_il_client_chiede_profilo_e_statistiche(self) -> None:
+        percorsi: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            percorsi.append(request.url.path)
+            if request.url.path.endswith("/stats"):
+                return httpx.Response(200, json=STATS_PAYLOAD)
+            return httpx.Response(200, json=PROFILE_PAYLOAD)
+
+        with client_with(handler) as client:
+            profile = client.fetch_profile("Cruciat")
+
+        assert percorsi == ["/pub/player/cruciat", "/pub/player/cruciat/stats"]
+        assert len(profile.ratings) == 3
+
+    def test_senza_statistiche_restituisce_il_profilo(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/stats"):
+                return httpx.Response(500)
+            return httpx.Response(200, json=PROFILE_PAYLOAD)
+
+        with client_with(handler, max_retries=0) as client:
+            profile = client.fetch_profile("cruciat")
+
+        assert profile.username == "cruciat"
+        assert profile.ratings == ()
+
+    def test_giocatore_inesistente(self) -> None:
+        with client_with(lambda request: httpx.Response(404)) as client:
+            with pytest.raises(PlayerNotFound):
+                client.fetch_profile("nessuno")

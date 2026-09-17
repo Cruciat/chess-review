@@ -122,3 +122,32 @@ class TestPartita:
         game = parse_game(game_payload(pgn="1. e4 e5 *"))
         assert game is not None
         assert game.started_at == game.end_time
+
+
+class TestIdentificativo:
+    def test_usa_tipo_e_numero_della_partita(self) -> None:
+        game = parse_game(game_payload(url="https://www.chess.com/game/live/123456789"))
+        assert game is not None
+        assert game.id == "live-123456789"
+
+    def test_distingue_le_partite_daily(self) -> None:
+        game = parse_game(game_payload(url="https://www.chess.com/game/daily/123456789"))
+        assert game is not None
+        assert game.id == "daily-123456789"
+
+    def test_riconosce_il_formato_vecchio(self) -> None:
+        game = parse_game(game_payload(url="https://www.chess.com/live/game/2185936567"))
+        assert game is not None
+        assert game.id == "live-2185936567"
+
+    def test_senza_url_riconoscibile_usa_l_uuid(self) -> None:
+        game = parse_game(game_payload(url="qualcosa", uuid="abc-123"))
+        assert game is not None
+        assert game.id == "abc-123"
+
+    def test_senza_uuid_resta_deterministico(self) -> None:
+        a = parse_game(game_payload(url="qualcosa", uuid=None))
+        b = parse_game(game_payload(url="qualcosa", uuid=None))
+        assert a is not None and b is not None
+        assert a.id == b.id
+        assert "/" not in a.id and ":" not in a.id
