@@ -1,0 +1,15 @@
+# Il contesto di build deve restare piccolo e, soprattutto, non deve
+# contenere node_modules della macchina di sviluppo: COPY ui/ lo
+# sovrascriverebbe a quello appena installato da npm ci.
+.git
+.venv
+**/__pycache__
+.pytest_cache
+.mypy_cache
+*.egg-info
+data
+*.db
+ui/node_modules
+ui/dist
+tests
+scripts

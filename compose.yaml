@@ -1,0 +1,14 @@
+services:
+  chess-review:
+    build: .
+    image: chess-review:local
+    container_name: chess-review
+    restart: unless-stopped
+    # tini come PID 1: inoltra i segnali a uvicorn (che così chiude
+    # Stockfish in modo pulito) e raccoglie eventuali processi zombie.
+    init: true
+    stop_grace_period: 15s
+    ports:
+      # Nessuna autenticazione: raggiungibile solo dalla LAN o via VPN.
+      # Se in futuro va dietro un reverse proxy, questa riga si toglie.
+      - "8000:8000"

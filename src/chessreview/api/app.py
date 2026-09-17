@@ -11,15 +11,18 @@ chiuderebbero la connessione prima della fine.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .schemas import analysis_json, game_json, player_json
@@ -166,3 +169,24 @@ def analyse_pgn(request: PgnRequest) -> dict[str, Any]:
     except ServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return analysis_json(analysis, None)
+
+
+# -- interfaccia -------------------------------------------------------------
+#
+# In produzione la UI compilata (ui/dist) viene servita da qui, sullo stesso
+# host e porta dell'API: il client usa URL relativi, quindi non servono né
+# CORS né un secondo server. In sviluppo la variabile non è impostata e la UI
+# resta a Vite.
+#
+# Il mount va registrato DOPO tutte le rotte: Starlette confronta le rotte
+# in ordine, e un mount su "/" registrato prima intercetterebbe anche /api.
+
+_ui_dir = os.environ.get("CHESSREVIEW_UI_DIR")
+if _ui_dir:
+    ui_path = Path(_ui_dir)
+    if not (ui_path / "index.html").is_file():
+        raise RuntimeError(
+            f"CHESSREVIEW_UI_DIR={_ui_dir} non contiene index.html: "
+            "compila la UI con 'npm run build' in ui/"
+        )
+    app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui")
